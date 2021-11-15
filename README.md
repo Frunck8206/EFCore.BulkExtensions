@@ -15,7 +15,8 @@ Available on <a href="https://www.nuget.org/packages/EFCore.BulkExtensions/"><im
 Package manager console command for installation: *Install-Package EFCore.BulkExtensions*<br>
 | Nuget | Target          | Used EF v.  | For projects targeting          |
 | ----- | --------------- | ----------- | ------------------------------- |
-| 5.x   | NetStandard 2.1 | EF Core 5.0 | Net 5+                          |
+| 6.x   | Net 6.0         | EF Core 6.0 | Net 6.0+                        |
+| 5.x   | NetStandard 2.1 | EF Core 5.0 | Net 5.0+                        |
 | 3.x   | NetStandard 2.0 | EF Core 3.n | NetCore(3.0+) or NetFrm(4.6.1+) [MoreInfo](https://github.com/borisdj/EFCore.BulkExtensions/issues/271#issuecomment-567117488)|
 | 2.x   | NetStandard 2.0 | EF Core 2.n | NetCore(2.0+) or NetFrm(4.6.1+) |
 | 1.x   | NetStandard 1.4 | EF Core 1.0 | NetCore(1.0+)                   |
@@ -97,7 +98,7 @@ Note: Bulk ops have optional argument *Type type* that can be set to type of Ent
 
 **Bulk** methods can have optional argument **BulkConfig** with properties (bool, int, object, List<string>):<br>
 ```C#
-PROPERTY : DEFAULTvalue                           SqlBulkCopyOptions: Default
+PROPERTY : DEFAULTvalue
 -----------------------                           PropertiesToInclude: null,
 PreserveInsertOrder: true,                        PropertiesToIncludeOnCompare: null,
 SetOutputIdentity: false,	                  PropertiesToIncludeOnUpdate: null,
@@ -111,7 +112,8 @@ CustomDestinationTableName: null,	          OmitClauseExistsExcept: false,
 TrackingEntities: false,	                  DoNotUpdateIfTimeStampChanged: false,
 WithHoldlock: true,	                          SRID: 4326,
 CalculateStats: false,	                          DateTime2PrecisionForceRound: false,
------------------------
+SqlBulkCopyOptions: Default                       TemporalColumns: { "PeriodStart", "PeriodEnd" }
+--------------------------------------------------------------------------------------
 METHOD: SetSynchronizeFilter<T>
 ```
 If we want to change defaults, BulkConfig should be added explicitly with one or more bool properties set to true, and/or int props like **BatchSize** to different number.<br> Config also has DelegateFunc for setting *Underlying-Connection/Transaction*, e.g. in UnderlyingTest.<br>
@@ -124,9 +126,11 @@ If we want Insert only new and skip existing ones in Db (Insert_if_not_Exist) th
 `PropertiesToIncludeOnUpdate = new List<string> { "" }`
 
 Additionaly there is **UpdateByProperties** for specifying custom properties, by which we want update to be done.<br>
+When setting multiple props in UpdateByProps then match done by columns combined, like unique constrain based on those cols.<br>
 Using UpdateByProperties while also having Identity column requires that Id property be [Excluded](https://github.com/borisdj/EFCore.BulkExtensions/issues/131).<br>
 If **NotifyAfter** is not set it will have same value as _BatchSize_ while **BulkCopyTimeout** when not set has SqlBulkCopy default which is 30 seconds and if set to 0 it indicates no limit.<br><br>
-_SetOutputIdentity_ have purpose only when PK has Identity (usually *int* type with AutoIncrement), while if PK is Guid(sequential) created in Application there is no need for them.<br> Also Tables with Composite Keys have no Identity column so no functionality for them in that case either.
+_SetOutputIdentity_ have purpose only when PK has Identity (usually *int* type with AutoIncrement), while if PK is Guid(sequential) created in Application there is no need for them.<br>
+Also Tables with Composite Keys have no Identity column so no functionality for them in that case either.
 ```C#
 var bulkConfig = new BulkConfig { SetOutputIdentity = true, BatchSize = 4000 };
 context.BulkInsert(entList, bulkConfig);
@@ -184,18 +188,23 @@ context.BulkInsert(entities, b => b.IncludeGraph = true);
 When **CalculateStats** set to True the result returned in `BulkConfig.StatsInfo` (*StatsNumber-Inserted/Updated/Deleted*).<br>
 If used for pure Insert (with Batching) then SetOutputIdentity should also be configured because Merge is required.<br>
 **TrackingEntities** can be set to True if we want to have tracking of entities from BulkRead or if SetOutputIdentity is set.<br>
-**UseTempDB** when set then BulkOperation has to be [inside Transaction](https://github.com/borisdj/EFCore.BulkExtensions/issues/49)<br>
+**UseTempDB** when set then BulkOperation has to be [inside Transaction](https://github.com/borisdj/EFCore.BulkExtensions/issues/49).<br>
 **UniqueTableNameTempDb** when changed to false temp table name will be only 'Temp' without random numbers.<br>
 **CustomDestinationTableName** can be set with 'TableName' only or with 'Schema.TableName'.<br>
 **EnableShadowProperties** to add (normal) Shadow Property and persist value. Disables automatic discrimator, use manual method.<br>
 **IncludeGraph** when set all entites that have relations with main ones from the list are also merged into theirs tables.<br>
 **OmitClauseExistsExcept** removes the clause from Merge statement, useful when need to active triggers even for same data.<br>
+_ Also in some [sql collation](https://github.com/borisdj/EFCore.BulkExtensions/issues/641) small and capital letters are considered  same (case-insensitive) so for BulkUpdate set it false.<br>
 **DoNotUpdateIfTimeStampChanged** if set checks TimeStamp for Concurrency, ones with conflict will [not be updated](https://github.com/borisdj/EFCore.BulkExtensions/issues/469#issuecomment-803662721).<br>
 **SRID** Spatial Reference Identifier - for SQL Server with NetTopologySuite.<br>
-**DateTime2PrecisionForceRound** If dbtype datetime2 has precision less then default 7, example 'datetime2(3)' SqlBulkCopy does Floor instead of Round so when this Property is set then Rounding will be done in memory to make sure inserted values are same as with regular SaveChanges.
+**DateTime2PrecisionForceRound** If dbtype datetime2 has precision less then default 7, example 'datetime2(3)' SqlBulkCopy does Floor instead of Round so when this Property is set then Rounding will be done in memory to make sure inserted values are same as with regular SaveChanges.<br>
+**TemporalColumns** are shadow columns used for Temporal table. Default elements 'PeriodStart' and 'PeriodEnd' can be changed if those columns have custom names.
 
 **SqlBulkCopyOptions** is Enum with [[Flags]](https://stackoverflow.com/questions/8447/what-does-the-flags-enum-attribute-mean-in-c) attribute which enables specifying one or more options:<br>
-*Default, KeepIdentity, CheckConstraints, TableLock, KeepNulls, FireTriggers, UseInternalTransaction*
+*Default, KeepIdentity, CheckConstraints, TableLock, KeepNulls, FireTriggers, UseInternalTransaction*<br>
+If need to set Identity PK in memory, Not let DB do the autoincrement, then need to use **KeepIdentity**:<br>
+`var bulkConfig = new BulkConfig { SqlBulkCopyOptions = SqlBulkCopyOptions.KeepIdentity };`<br>
+Useful for example when copying from one Db to another.
 
 **SetSynchronizeFilter<T>** A method that receives and sets expresion filter on entities to delete when using BulkInsertOrUpdateOrDelete.<br>
 

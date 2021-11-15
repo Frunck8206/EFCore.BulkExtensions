@@ -103,6 +103,16 @@ namespace EFCore.BulkExtensions
             sqlParameters = ReloadSqlParameters(context, sqlParameters); // Sqlite requires SqliteParameters
 
             var resultQuery = $"{leadingComments}UPDATE {topStatement}{tableAlias}{tableAliasSufixAs} {sqlSET}{sql}";
+
+            if (resultQuery.Contains("ORDER") && resultQuery.Contains("TOP"))
+            {
+                resultQuery = $"WITH C AS (SELECT {topStatement}*{sql}) UPDATE C {sqlSET}";
+            }
+            if (resultQuery.Contains("ORDER") && !resultQuery.Contains("TOP")) // When query has ORDER only without TOP(Take) then it is removed since not required and to avoid invalid Sql
+            {
+                resultQuery = resultQuery.Split("ORDER", StringSplitOptions.None)[0];
+            }
+
             return (resultQuery, sqlParameters);
         }
 
@@ -127,6 +137,17 @@ namespace EFCore.BulkExtensions
                 : createUpdateBodyData.UpdateColumnsSql.Replace($"[{tableAlias}].", "");
 
             var resultQuery = $"{leadingComments}UPDATE {topStatement}{tableAlias}{tableAliasSufixAs} SET {sqlColumns} {sql}";
+
+            if (resultQuery.Contains("ORDER") && resultQuery.Contains("TOP"))
+            {
+                string tableAliasPrefix = "[" + tableAlias + "].";
+                resultQuery = $"WITH C AS (SELECT {topStatement}*{sql}) UPDATE C SET {sqlColumns.Replace(tableAliasPrefix, "")}";
+            }
+            if (resultQuery.Contains("ORDER") && !resultQuery.Contains("TOP")) // When query has ORDER only without TOP(Take) then it is removed since not required and to avoid invalid Sql
+            {
+                resultQuery = resultQuery.Split("ORDER", StringSplitOptions.None)[0];
+            }
+
             return (resultQuery, sqlParameters);
         }
 
@@ -197,7 +218,12 @@ namespace EFCore.BulkExtensions
 
                     if (tableInfo.ConvertibleColumnConverterDict.ContainsKey(columnName))
                     {
-                        propertyUpdateValue = tableInfo.ConvertibleColumnConverterDict[columnName].ConvertToProvider.Invoke(propertyUpdateValue);
+                        bool isEnum = tableInfo.ColumnToPropertyDictionary[columnName].ClrType.IsEnum;
+                        if (!isEnum) // Omit from ConvertibleColumns because there Enum of byte type gets converter to Number which is then different from default enum value // Test: RunBatchUpdateEnum
+                        {
+                            propertyUpdateValue = tableInfo.ConvertibleColumnConverterDict[columnName].ConvertToProvider.Invoke(propertyUpdateValue);
+                            propertyDefaultValue = tableInfo.ConvertibleColumnConverterDict[columnName].ConvertToProvider.Invoke(propertyDefaultValue);
+                        }
                     }
 
                     bool isDifferentFromDefault = propertyUpdateValue != null && propertyUpdateValue?.ToString() != propertyDefaultValue?.ToString();
@@ -389,7 +415,8 @@ namespace EFCore.BulkExtensions
             var queryCompiler = typeof(EntityQueryProvider).GetField("_queryCompiler", bindingFlags).GetValue(query.Provider);
             var queryContextFactory = queryCompiler.GetType().GetField("_queryContextFactory", bindingFlags).GetValue(queryCompiler);
 
-            var dependencies = typeof(RelationalQueryContextFactory).GetField("_dependencies", bindingFlags).GetValue(queryContextFactory);
+            var dependencies = typeof(RelationalQueryContextFactory).GetProperty("Dependencies", bindingFlags).GetValue(queryContextFactory);
+
             var queryContextDependencies = typeof(DbContext).Assembly.GetType(typeof(QueryContextDependencies).FullName);
             var stateManagerProperty = queryContextDependencies.GetProperty("StateManager", bindingFlags | BindingFlags.Public).GetValue(dependencies);
             var stateManager = (IStateManager)stateManagerProperty;

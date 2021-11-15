@@ -21,6 +21,8 @@ namespace EFCore.BulkExtensions.Tests
         public DbSet<UserRole> UserRoles { get; set; }
 
         public DbSet<Document> Documents { get; set; }
+        public DbSet<Storage> Storages { get; set; }
+
         public DbSet<File> Files { get; set; }
         public DbSet<Person> Persons { get; set; }
         public DbSet<Student> Students { get; set; }
@@ -49,6 +51,11 @@ namespace EFCore.BulkExtensions.Tests
 
         public DbSet<Archive> Archives { get; set; }
 
+        public DbSet<Source> Sources { get; set; }
+
+        public DbSet<Department> Departments { get; set; }
+        public DbSet<Division> Divisions { get; set; }
+
         public TestContext(DbContextOptions options) : base(options)
         {
             Database.EnsureCreated();
@@ -66,35 +73,44 @@ namespace EFCore.BulkExtensions.Tests
 
             modelBuilder.Entity<UserRole>().HasKey(a => new { a.UserId, a.RoleId });
 
-            modelBuilder.Entity<Info>(e => { e.Property(p => p.ConvertedTime).HasConversion((value) => value.AddDays(1), (value) => value.AddDays(-1)); });
-            modelBuilder.Entity<Info>().Property(e => e.InfoType).HasConversion(new EnumToStringConverter<InfoType>());
+            modelBuilder.Entity<Info>(a => { a.Property(p => p.ConvertedTime).HasConversion((value) => value.AddDays(1), (value) => value.AddDays(-1)); });
+            modelBuilder.Entity<Info>().Property(p => p.InfoType).HasConversion(new EnumToStringConverter<InfoType>());
+            modelBuilder.Entity<Info>().Property(p => p.DateTimeOff).HasConversion(new DateTimeOffsetToBinaryConverter());
 
             modelBuilder.Entity<Info>(e => { e.Property("LogData"); });
             modelBuilder.Entity<Info>(e => { e.Property("TimeCreated"); });
             modelBuilder.Entity<Info>(e => { e.Property("Remark"); });
 
-            modelBuilder.Entity<ChangeLog>().OwnsOne(e => e.Audit, b => b.Property(e => e.InfoType).HasConversion(new EnumToStringConverter<InfoType>()));
+            modelBuilder.Entity<ChangeLog>().OwnsOne(a => a.Audit, b => b.Property(p => p.InfoType).HasConversion(new EnumToStringConverter<InfoType>()));
 
             modelBuilder.Entity<Person>().HasIndex(a => a.Name).IsUnique(); // In SQLite UpdateByColumn(nonPK) requires it has UniqueIndex
 
             modelBuilder.Entity<Document>().Property(p => p.IsActive).HasDefaultValue(true);
             modelBuilder.Entity<Document>().Property(p => p.Tag).HasDefaultValue("DefaultData");
 
-            modelBuilder.Entity<Log>().ToTable("Log");
-            modelBuilder.Entity<LogPersonReport>().ToTable("LogPersonReport");
+            modelBuilder.Entity<Log>().ToTable(nameof(Log));
+            modelBuilder.Entity<LogPersonReport>().ToTable(nameof(LogPersonReport));
 
             if (Database.IsSqlServer())
             {
                 modelBuilder.Entity<Document>().Property(p => p.DocumentId).HasDefaultValueSql("NEWID()");
                 modelBuilder.Entity<Document>().Property(p => p.ContentLength).HasComputedColumnSql($"(CONVERT([int], len([{nameof(Document.Content)}])))");
 
+                modelBuilder.Entity<Storage>().ToTable(nameof(Storage), b => b.IsTemporal());
+
                 modelBuilder.Entity<UdttIntInt>(entity => { entity.HasNoKey(); });
+
+                modelBuilder.Entity<Address>().Property(p => p.LocationGeometry).HasColumnType("geometry");
+
+                modelBuilder.Entity<Division>().Property(p => p.Id).HasDefaultValueSql("NEWSEQUENTIALID()");
+                modelBuilder.Entity<Department>().Property(p => p.Id).HasDefaultValueSql("NEWSEQUENTIALID()");
             }
             else if (Database.IsSqlite())
             {
                 modelBuilder.Entity<File>().Property(p => p.VersionChange).ValueGeneratedOnAddOrUpdate().IsConcurrencyToken().HasDefaultValueSql("CURRENT_TIMESTAMP");
 
-                modelBuilder.Entity<Address>().Ignore(p => p.Location);
+                modelBuilder.Entity<Address>().Ignore(p => p.LocationGeography);
+                modelBuilder.Entity<Address>().Ignore(p => p.LocationGeometry);
 
                 modelBuilder.Entity<ItemHistory>().ToTable(nameof(ItemHistory));
             }
@@ -274,7 +290,8 @@ namespace EFCore.BulkExtensions.Tests
         public int AddressId { get; set; }
         public string Street { get; set; }
 
-        public Geometry Location { get; set; }
+        public Geometry LocationGeography { get; set; }
+        public Geometry LocationGeometry { get; set; }
     }
 
     public class Teacher : Person
@@ -298,6 +315,14 @@ namespace EFCore.BulkExtensions.Tests
 
         [DatabaseGenerated(DatabaseGeneratedOption.Computed)] // Computed columns also have to be configured with FluentAPI
         public int ContentLength { get; set; }
+    }
+
+    // For testing Temporal tables (configured via FluentAPI )
+    public class Storage
+    {
+        public Guid StorageId { get; set; }
+
+        public string Data { get; set; }
     }
 
     // For testing TimeStamp Property and Column with Concurrency Lock
@@ -357,6 +382,8 @@ namespace EFCore.BulkExtensions.Tests
 
         [Required]
         private string LogData { get { return logData; } set { logData = value; } }
+
+        public DateTimeOffset DateTimeOff { get; set; } // ValueConverter to Binary
 
         public string GetLogData() { return logData; }
         public DateTime GetDateCreated() { return TimeCreated.Date; }
@@ -519,5 +546,31 @@ namespace EFCore.BulkExtensions.Tests
     {
         public byte[] ArchiveId { get; set; }
         public string Description { get; set; }
+    }
+
+    public class Source
+    {
+        public int SourceId { get; set; }
+        public Status StatusId { get; set; }
+        public Type TypeId { get; set; }
+    }
+    public enum Status : byte { Init, Changed }
+    public enum Type : byte { Undefined, Type1, Type2 }
+
+    public class Department
+    {
+        public Guid Id { get; set; }
+        public string Name { get; set; }
+
+        public ICollection<Division> Divisions { get; set; }
+    }
+
+    public class Division
+    {
+        public Guid Id { get; set; }
+        public string Name { get; set; }
+
+        public Guid DepartmentId { get; set; }
+        public Department Department { get; set; }
     }
 }

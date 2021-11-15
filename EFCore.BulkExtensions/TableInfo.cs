@@ -44,6 +44,7 @@ namespace EFCore.BulkExtensions
         public bool ColumnNameContainsSquareBracket { get; set; }
         public bool LoadOnlyPKColumn { get; set; }
         public bool HasSpatialType { get; set; }
+        public bool HasTemporalColumns { get; set; }
         public int NumberOfEntities { get; set; }
 
         public BulkConfig BulkConfig { get; set; }
@@ -143,8 +144,10 @@ namespace EFCore.BulkExtensions
             foreach (var entityProperty in entityType.GetProperties())
             {
                 var columnName = entityProperty.GetColumnName(ObjectIdentifier);
+                bool isTemporalColumn = entityProperty.IsShadowProperty() && entityProperty.ClrType == typeof(DateTime) && BulkConfig.TemporalColumns.Contains(columnName);
+                HasTemporalColumns = HasTemporalColumns || isTemporalColumn;
 
-                if (columnName == null)
+                if (columnName == null || isTemporalColumn)
                     continue;
 
                 allProperties.Add(entityProperty);
@@ -193,14 +196,13 @@ namespace EFCore.BulkExtensions
             OwnedTypesDict = ownedTypes.ToDictionary(a => a.Name, a => a);
 
             IdentityColumnName = allProperties.SingleOrDefault(a => a.IsPrimaryKey() &&
-                                                                     (a.ClrType.Name.StartsWith("Byte") ||
-                                                                      a.ClrType.Name.StartsWith("SByte") ||
-                                                                      a.ClrType.Name.StartsWith("Int") ||
-                                                                      a.ClrType.Name.StartsWith("UInt") ||
-                                                                      (isSqlServer && a.ClrType.Name.StartsWith("Decimal"))) &&
-                                                                    !a.ClrType.Name.EndsWith("[]") && 
-                                                                    a.ValueGenerated == ValueGenerated.OnAdd
-                                                              )?.GetColumnName(ObjectIdentifier); // ValueGenerated equals OnAdd even for nonIdentity column like Guid so we only type int as second condition
+                                                                    a.ValueGenerated == ValueGenerated.OnAdd && // ValueGenerated equals OnAdd for nonIdentity column like Guid so take only number types
+                                                                    (a.ClrType.Name.StartsWith("Byte") ||
+                                                                     a.ClrType.Name.StartsWith("SByte")||
+                                                                     a.ClrType.Name.StartsWith("Int")  ||
+                                                                     a.ClrType.Name.StartsWith("UInt") ||
+                                                                     (isSqlServer && a.ClrType.Name.StartsWith("Decimal")))
+                                                              )?.GetColumnName(ObjectIdentifier);
 
             // timestamp/row version properties are only set by the Db, the property has a [Timestamp] Attribute or is configured in FluentAPI with .IsRowVersion()
             // They can be identified by the columne type "timestamp" or .IsConcurrencyToken in combination with .ValueGenerated == ValueGenerated.OnAddOrUpdate
@@ -215,7 +217,13 @@ namespace EFCore.BulkExtensions
             var allPropertiesExceptTimeStamp = allProperties.Except(timeStampProperties);
             var properties = allPropertiesExceptTimeStamp.Where(a => a.GetComputedColumnSql() == null);
 
-            var propertiesWithDefaultValues = allPropertiesExceptTimeStamp.Where(a => a.GetDefaultValue() != null || a.GetDefaultValueSql() != null);
+            var propertiesWithDefaultValues = allPropertiesExceptTimeStamp.Where(a =>
+                !a.IsShadowProperty() &&
+                (a.GetDefaultValueSql() != null ||
+                 (a.GetDefaultValue() != null &&
+                  a.ValueGenerated != ValueGenerated.Never
+                  && a.ClrType != typeof(Guid)) // Since .Net_6.0 in EF 'Guid' type has DefaultValue even when not explicitly defined with Annotation or FluentApi
+                ));
             foreach (var propertyWithDefaultValue in propertiesWithDefaultValues)
             {
                 var propertyType = propertyWithDefaultValue.ClrType;
@@ -224,7 +232,8 @@ namespace EFCore.BulkExtensions
                                   : null; // when type does not have parameterless constructor, like String for example, then default value is 'null'
 
                 bool listHasAllDefaultValues = !entities.Any(a => a.GetType().GetProperty(propertyWithDefaultValue.Name).GetValue(a, null)?.ToString() != instance?.ToString());
-                if (listHasAllDefaultValues || PrimaryKeysPropertyColumnNameDict.ContainsKey(propertyWithDefaultValue.Name)) // it is not feasible to have in same list simultaneously both entities groups With and Without default values, they are omitted OnInsert only if all have default values or if it is PK (like Guid DbGenerated)
+                // it is not feasible to have in same list simultaneously both entities groups With and Without default values, they are omitted OnInsert only if all have default values or if it is PK (like Guid DbGenerated)
+                if (listHasAllDefaultValues || (PrimaryKeysPropertyColumnNameDict.ContainsKey(propertyWithDefaultValue.Name) && propertyType == typeof(Guid)))
                 {
                     DefaultValueProperties.Add(propertyWithDefaultValue.Name);
                 }
@@ -287,6 +296,11 @@ namespace EFCore.BulkExtensions
             }
 
             UpdateByPropertiesAreNullable = properties.Any(a => PrimaryKeysPropertyColumnNameDict.ContainsKey(a.Name) && a.IsNullable);
+
+            if (HasTemporalColumns && BulkConfig.SetOutputIdentity)
+            {
+                throw new InvalidConstraintException("When table has Temporal columns SetOutputIdentity can not be used.");
+            }
 
             if (AreSpecifiedPropertiesToInclude || AreSpecifiedPropertiesToExclude)
             {
@@ -607,12 +621,12 @@ namespace EFCore.BulkExtensions
                 {
                     foreach (var element in propertyArray)
                     {
-                        uniqueBuilder.Append(element.ToString());
+                        uniqueBuilder.Append(element?.ToString() ?? "null");
                     }
                 }
                 else
                 {
-                    uniqueBuilder.Append(property.ToString());
+                    uniqueBuilder.Append(property?.ToString() ?? "null");
                 }
 
                 uniqueBuilder.Append(delimiter);
@@ -723,8 +737,10 @@ namespace EFCore.BulkExtensions
                             idValue = (int)value;
                         else if (idType == typeof(ulong))
                             idValue = (ulong)value;
+                        else if (idType == typeof(decimal))
+                            idValue = (decimal)value;
                         else
-                            idValue = (long)value;
+                            idValue = (long)value; // type 'long' left as default
 
                         identityFastProperty.Set(entity, idValue);
                         i++;
@@ -748,7 +764,8 @@ namespace EFCore.BulkExtensions
 
         protected void UpdateEntitiesIdentity<T>(DbContext context, TableInfo tableInfo, IList<T> entities, IList<object> entitiesWithOutputIdentity)
         {
-            var identityPropertyName = OutputPropertyColumnNamesDict.SingleOrDefault(a => a.Value == IdentityColumnName).Key;
+            var identifierPropertyName = IdentityColumnName != null ? OutputPropertyColumnNamesDict.SingleOrDefault(a => a.Value == IdentityColumnName).Key // it Identity autoincrement 
+                                                                    : PrimaryKeysPropertyColumnNameDict.FirstOrDefault().Key;                               // or PK with default sql value
 
             if (BulkConfig.PreserveInsertOrder) // Updates Db changed Columns in entityList
             {
@@ -770,10 +787,10 @@ namespace EFCore.BulkExtensions
                 var numberOfOutputEntities = Math.Min(NumberOfEntities, entitiesWithOutputIdentity.Count);
                 for (int i = 0; i < numberOfOutputEntities; i++)
                 {
-                    if (identityPropertyName != null)
+                    if (identifierPropertyName != null)
                     {
-                        var identityPropertyValue = FastPropertyDict[identityPropertyName].Get(entitiesWithOutputIdentity[i]);
-                        FastPropertyDict[identityPropertyName].Set(entities[i], identityPropertyValue);
+                        var identityPropertyValue = FastPropertyDict[identifierPropertyName].Get(entitiesWithOutputIdentity[i]);
+                        FastPropertyDict[identifierPropertyName].Set(entities[i], identityPropertyValue);
                     }
 
                     if (TimeStampColumnName != null) // timestamp/rowversion is also generated by the SqlServer so if exist should be updated as well
@@ -783,8 +800,9 @@ namespace EFCore.BulkExtensions
                         FastPropertyDict[timeStampPropertyName].Set(entities[i], timeStampPropertyValue);
                     }
 
-                    var propertiesToLoad = tableInfo.OutputPropertyColumnNamesDict.Keys.Where(a => a != identityPropertyName && a != TimeStampColumnName && // already loaded in segmet above
-                                                                                                   !tableInfo.PropertyColumnNamesDict.ContainsKey(a));      // add Computed and DefaultValues
+                    var propertiesToLoad = tableInfo.OutputPropertyColumnNamesDict.Keys.Where(a => a != identifierPropertyName && a != TimeStampColumnName && // already loaded in segmet above
+                                                                                                   (tableInfo.DefaultValueProperties.Contains(a) ||           // add Computed and DefaultValues
+                                                                                                    !tableInfo.PropertyColumnNamesDict.ContainsKey(a)));      // remove others since already have same have (could be omited)
                     foreach (var outputPropertyName in propertiesToLoad)
                     {
                         var propertyValue = FastPropertyDict[outputPropertyName].Get(entitiesWithOutputIdentity[i]);
@@ -814,7 +832,8 @@ namespace EFCore.BulkExtensions
         #region CompiledQuery
         public async Task LoadOutputDataAsync<T>(DbContext context, Type type, IList<T> entities, TableInfo tableInfo, CancellationToken cancellationToken, bool isAsync) where T : class
         {
-            bool hasIdentity = OutputPropertyColumnNamesDict.Any(a => a.Value == IdentityColumnName);
+            bool hasIdentity = OutputPropertyColumnNamesDict.Any(a => a.Value == IdentityColumnName) ||
+                               (tableInfo.HasSinglePrimaryKey && tableInfo.DefaultValueProperties.Contains(tableInfo.PrimaryKeysPropertyColumnNameDict.FirstOrDefault().Key));
             int totallNumber = entities.Count;
             if (BulkConfig.SetOutputIdentity && hasIdentity)
             {
